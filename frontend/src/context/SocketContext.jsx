@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import { AuthContext } from './AuthContext';
+import { getApiUrl } from '../api/apiConfig';
 
 export const SocketContext = createContext();
 
@@ -11,7 +12,7 @@ export const SocketProvider = ({ children }) => {
 
   useEffect(() => {
     if (!isAuthenticated || !user) { if (socket) { socket.disconnect(); setSocket(null); } return; }
-    const URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+    const URL = getApiUrl();
     const newSocket = io(URL, { transports: ['websocket', 'polling'] });
     newSocket.on('connect', () => { setIsConnected(true); newSocket.emit('joinRestaurant', user._id); });
     newSocket.on('disconnect', () => setIsConnected(false));
