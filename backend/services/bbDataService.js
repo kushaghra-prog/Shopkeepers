@@ -1,34 +1,90 @@
 /**
  * Bunny Burger Data Service
- * Reads/writes Bunny Burger's JSON data files directly.
+ * Proxies Bunny Burger API responses into Shopkeepers formats.
  * Transforms BB data format → SK frontend format on the fly.
  */
 
-const fs = require('fs').promises;
-const path = require('path');
+const axios = require("axios");
+const crypto = require("crypto");
 
 // Path to Bunny Burger's server/data directory
-const BB_DATA_DIR = process.env.BB_DATA_DIR || path.join(__dirname, '..', '..', '..', '..', 'food Delivery App', 'Bunny-Burger', 'server', 'data');
+const BB_API = process.env.BB_API_URL;
 
-const ordersFile = path.join(BB_DATA_DIR, 'orders.json');
-const productsFile = path.join(BB_DATA_DIR, 'products.json');
+if (!BB_API) {
+  throw new Error('BB_API_URL is not defined in .env');
+}
 
-// ──────────── Low-level file I/O ────────────
+const CACHE_TTL_MS = 30 * 1000;
+const productsMapCache = { value: null, expiresAt: 0 };
+const ordersListCache = { value: null, expiresAt: 0 };
 
-async function readJson(filePath) {
+function unwrapApiArray(data, key) {
+  if (Array.isArray(data?.[key])) return data[key];
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data)) return data;
+  return [];
+}
+
+function unwrapApiEntity(data, fallback, keys = []) {
+  if (data && typeof data === 'object') {
+    for (const key of keys) {
+      if (data[key] && typeof data[key] === 'object') {
+        return data[key];
+      }
+    }
+
+    if (data.data && typeof data.data === 'object') {
+      return data.data;
+    }
+
+    if (data.id !== undefined || data.orderId !== undefined || data.name !== undefined) {
+      return data;
+    }
+  }
+
+  return fallback;
+}
+
+function getAxiosErrorMessage(error, fallbackPrefix) {
+  const message = error.response?.data?.message || error.response?.data?.error || error.message;
+  return fallbackPrefix ? `${fallbackPrefix}: ${message}` : message;
+}
+
+function invalidateProductsCache() {
+  productsMapCache.value = null;
+  productsMapCache.expiresAt = 0;
+}
+
+function invalidateOrdersCache() {
+  ordersListCache.value = null;
+  ordersListCache.expiresAt = 0;
+}
+
+function normalizeBBCategory(category) {
+  const key = String(category || '').trim().toLowerCase();
+  return BB_TO_SK_CATEGORY[key] || (key ? key.charAt(0).toUpperCase() + key.slice(1) : 'Starters');
+}
+
+async function loadOrdersList({ forceRefresh = false } = {}) {
+  const now = Date.now();
+  if (!forceRefresh && ordersListCache.value && ordersListCache.expiresAt > now) {
+    return ordersListCache.value;
+  }
+
   try {
-    const raw = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(raw);
-  } catch {
-    return [];
+    const { data } = await axios.get(`${BB_API}/api/orders`);
+    const bbOrders = unwrapApiArray(data, 'orders');
+    ordersListCache.value = bbOrders;
+    ordersListCache.expiresAt = now + CACHE_TTL_MS;
+    return bbOrders;
+  } catch (error) {
+    if (ordersListCache.value) {
+      return ordersListCache.value;
+    }
+
+    throw new Error(getAxiosErrorMessage(error, 'Failed to load orders from Bunny Burger'));
   }
 }
-
-async function writeJson(filePath, data) {
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
-}
-
-// ──────────── Status Mapping ────────────
 
 // BB uses 'confirmed' for new orders, SK uses 'Pending'
 const BB_TO_SK_STATUS = {
@@ -84,12 +140,29 @@ const SK_TO_BB_CATEGORY = {
 // ──────────── Product Lookup Cache ────────────
 
 async function loadProductsMap() {
-  const bbProducts = await readJson(productsFile);
-  const map = {};
-  for (const p of bbProducts) {
-    map[String(p.id)] = p;
+  const now = Date.now();
+  if (productsMapCache.value && productsMapCache.expiresAt > now) {
+    return productsMapCache.value;
   }
-  return map;
+
+  try {
+    const { data } = await axios.get(`${BB_API}/api/products`);
+    const bbProducts = unwrapApiArray(data, 'products');
+    const map = {};
+    for (const p of bbProducts) {
+      map[String(p.id)] = p;
+    }
+
+    productsMapCache.value = map;
+    productsMapCache.expiresAt = now + CACHE_TTL_MS;
+    return map;
+  } catch (error) {
+    if (productsMapCache.value) {
+      return productsMapCache.value;
+    }
+
+    throw new Error(getAxiosErrorMessage(error, 'Failed to load products from Bunny Burger'));
+  }
 }
 
 // ──────────── Order Transformations ────────────
@@ -146,7 +219,7 @@ function transformBBProductToSK(bbProduct) {
     name: bbProduct.name,
     description: bbProduct.desc || bbProduct.description || '',
     price: bbProduct.price,
-    category: BB_TO_SK_CATEGORY[bbProduct.category] || bbProduct.category || 'Starters',
+    category: normalizeBBCategory(bbProduct.category),
     image: bbProduct.image || '',
     isVeg: bbProduct.veg === true || bbProduct.isVeg === true,
     isAvailable: bbProduct.isAvailable !== false,
@@ -159,13 +232,15 @@ function transformBBProductToSK(bbProduct) {
 }
 
 function transformSKProductToBB(skProduct, existingId) {
+  const price = Number(skProduct.price) || 0;
+
   return {
     id: existingId || Date.now(),
     name: skProduct.name,
     desc: skProduct.description || '',
     description: skProduct.description || '',
-    price: Number(skProduct.price),
-    oldPrice: Number(skProduct.price) + 50,
+    price,
+    oldPrice: price + 50,
     rating: skProduct.rating || 4.5,
     category: SK_TO_BB_CATEGORY[skProduct.category] || skProduct.category?.toLowerCase() || 'burgers',
     image: skProduct.image || 'https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=500&h=500&fit=crop',
@@ -181,7 +256,7 @@ function transformSKProductToBB(skProduct, existingId) {
 // ──────────── Orders API ────────────
 
 async function getOrders({ status, search, startDate, endDate, page = 1, limit = 20 } = {}) {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
   const productsMap = await loadProductsMap();
   let skOrders = bbOrders.map(o => transformBBOrderToSK(o, productsMap));
 
@@ -193,7 +268,7 @@ async function getOrders({ status, search, startDate, endDate, page = 1, limit =
   if (search) {
     const q = search.toLowerCase();
     skOrders = skOrders.filter(o =>
-      o.orderNumber.toLowerCase().includes(q) ||
+      String(o.orderNumber).toLowerCase().includes(q) ||
       o.customer?.name?.toLowerCase().includes(q) ||
       o.customer?.phone?.includes(q)
     );
@@ -227,7 +302,7 @@ async function getOrders({ status, search, startDate, endDate, page = 1, limit =
 }
 
 async function getOrderById(orderId) {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
   const bbOrder = bbOrders.find(o => o.orderId === orderId);
   if (!bbOrder) return null;
   const productsMap = await loadProductsMap();
@@ -235,33 +310,29 @@ async function getOrderById(orderId) {
 }
 
 async function updateOrderStatus(orderId, newStatus) {
-  const bbOrders = await readJson(ordersFile);
-  const idx = bbOrders.findIndex(o => o.orderId === orderId);
-  if (idx === -1) return null;
+  try {
+    const { data } = await axios.put(
+      `${BB_API}/api/orders/${orderId}/status`,
+      {
+        status: SK_TO_BB_STATUS[newStatus] || newStatus,
+      }
+    );
 
-  // Update status in BB format
-  bbOrders[idx].status = SK_TO_BB_STATUS[newStatus] || newStatus;
+    const updatedOrder = unwrapApiEntity(data, null, ['order']);
+    if (updatedOrder) {
+      invalidateOrdersCache();
+      const productsMap = await loadProductsMap();
+      return transformBBOrderToSK(updatedOrder, productsMap);
+    }
 
-  // Also store the SK status for display consistency
-  if (!['confirmed', 'cancelled'].includes(newStatus.toLowerCase())) {
-    bbOrders[idx].status = newStatus;
+    invalidateOrdersCache();
+    return await getOrderById(orderId);
+  } catch (error) {
+    throw new Error(getAxiosErrorMessage(error, 'Failed to update order status'));
   }
-
-  // Add timeline entry
-  if (!bbOrders[idx].timeline) {
-    bbOrders[idx].timeline = [{ status: 'Pending', timestamp: bbOrders[idx].createdAt }];
-  }
-  bbOrders[idx].timeline.push({ status: newStatus, timestamp: new Date().toISOString() });
-  bbOrders[idx].updatedAt = new Date().toISOString();
-
-  await writeJson(ordersFile, bbOrders);
-  const productsMap = await loadProductsMap();
-  return transformBBOrderToSK(bbOrders[idx], productsMap);
 }
 
 async function createOrderInBB(orderData) {
-  const bbOrders = await readJson(ordersFile);
-  const crypto = require('crypto');
   const orderId = 'BB-' + crypto.randomBytes(4).toString('hex').toUpperCase();
 
   const newOrder = {
@@ -291,16 +362,22 @@ async function createOrderInBB(orderData) {
     createdAt: new Date().toISOString(),
   };
 
-  bbOrders.push(newOrder);
-  await writeJson(ordersFile, bbOrders);
-  const productsMap = await loadProductsMap();
-  return transformBBOrderToSK(newOrder, productsMap);
+  try {
+    const { data } = await axios.post(`${BB_API}/api/orders`, newOrder);
+    const createdOrder = unwrapApiEntity(data, newOrder, ['order']);
+    invalidateOrdersCache();
+    const productsMap = await loadProductsMap();
+    return transformBBOrderToSK(createdOrder, productsMap);
+  } catch (error) {
+    throw new Error(getAxiosErrorMessage(error, 'Failed to create order'));
+  }
 }
 
 // ──────────── Products API ────────────
 
 async function getProducts({ category, search } = {}) {
-  const bbProducts = await readJson(productsFile);
+  const productsMap = await loadProductsMap();
+  const bbProducts = Object.values(productsMap);
   let skProducts = bbProducts.map(transformBBProductToSK);
 
   if (category && category !== 'All') {
@@ -319,71 +396,112 @@ async function getProducts({ category, search } = {}) {
 }
 
 async function getProductById(productId) {
-  const bbProducts = await readJson(productsFile);
+  const bbProducts = Object.values(await loadProductsMap());
   const p = bbProducts.find(item => String(item.id) === String(productId));
   if (!p) return null;
   return transformBBProductToSK(p);
 }
 
 async function createProduct(productData) {
-  const bbProducts = await readJson(productsFile);
+  try {
+    const newProduct = transformSKProductToBB(productData);
 
-  // Generate next ID
-  const maxId = bbProducts.reduce((max, p) => Math.max(max, typeof p.id === 'number' ? p.id : 0), 0);
-  const newProduct = transformSKProductToBB(productData, maxId + 1);
+    const response = await axios.post(
+      `${BB_API}/api/products`,
+      newProduct
+    );
 
-  bbProducts.push(newProduct);
-  await writeJson(productsFile, bbProducts);
-  return transformBBProductToSK(newProduct);
+    const createdProduct = unwrapApiEntity(response.data, newProduct, ['product', 'item']);
+    invalidateProductsCache();
+    return transformBBProductToSK(createdProduct);
+  } catch (error) {
+    throw new Error(getAxiosErrorMessage(error, 'Failed to create product'));
+  }
 }
 
 async function updateProduct(productId, productData) {
-  const bbProducts = await readJson(productsFile);
-  const idx = bbProducts.findIndex(p => String(p.id) === String(productId));
-  if (idx === -1) return null;
+  try {
+    const bbProducts = Object.values(await loadProductsMap());
+    const idx = bbProducts.findIndex(p => String(p.id) === String(productId));
+    if (idx === -1) return null;
 
-  // Merge the update with existing data
-  const existing = bbProducts[idx];
-  const updated = {
-    ...existing,
-    name: productData.name || existing.name,
-    desc: productData.description || existing.desc,
-    description: productData.description || existing.description || existing.desc,
-    price: Number(productData.price) || existing.price,
-    category: SK_TO_BB_CATEGORY[productData.category] || productData.category?.toLowerCase() || existing.category,
-    veg: productData.isVeg !== undefined ? productData.isVeg : existing.veg,
-    isVeg: productData.isVeg !== undefined ? productData.isVeg : existing.isVeg,
-    isAvailable: productData.isAvailable !== undefined ? productData.isAvailable : existing.isAvailable,
-    preparationTime: Number(productData.preparationTime) || existing.preparationTime,
-  };
+    // Merge the update with existing data
+    const existing = bbProducts[idx];
+    const updated = {
+      ...existing,
+      name: productData.name || existing.name,
+      desc: productData.description || existing.desc,
+      description: productData.description || existing.description || existing.desc,
+      price: productData.price !== undefined ? Number(productData.price) : existing.price,
+      category: SK_TO_BB_CATEGORY[productData.category] || productData.category?.toLowerCase() || existing.category,
+      veg: productData.isVeg !== undefined ? productData.isVeg : existing.veg,
+      isVeg: productData.isVeg !== undefined ? productData.isVeg : existing.isVeg,
+      isAvailable: productData.isAvailable !== undefined ? productData.isAvailable : existing.isAvailable,
+      preparationTime: productData.preparationTime !== undefined
+        ? Number(productData.preparationTime)
+        : existing.preparationTime,
+      image: productData.image !== undefined ? productData.image : existing.image,
+      rating: productData.rating !== undefined ? Number(productData.rating) : existing.rating,
+      tag: productData.tag !== undefined ? productData.tag : existing.tag,
+      tagColor: productData.tagColor !== undefined ? productData.tagColor : existing.tagColor,
+      oldPrice: productData.oldPrice !== undefined ? Number(productData.oldPrice) : existing.oldPrice,
+    };
 
-  bbProducts[idx] = updated;
-  await writeJson(productsFile, bbProducts);
-  return transformBBProductToSK(updated);
+    const response = await axios.put(
+      `${BB_API}/api/products/${productId}`,
+      updated
+    );
+
+    const savedProduct = unwrapApiEntity(response.data, updated, ['product', 'item']);
+    invalidateProductsCache();
+    return transformBBProductToSK(savedProduct);
+  } catch (error) {
+    throw new Error(getAxiosErrorMessage(error, 'Failed to update product'));
+  }
 }
 
 async function deleteProduct(productId) {
-  const bbProducts = await readJson(productsFile);
-  const idx = bbProducts.findIndex(p => String(p.id) === String(productId));
-  if (idx === -1) return false;
-  bbProducts.splice(idx, 1);
-  await writeJson(productsFile, bbProducts);
-  return true;
+  try {
+    const bbProducts = Object.values(await loadProductsMap());
+    const exists = bbProducts.some(p => String(p.id) === String(productId));
+    if (!exists) return false;
+
+    await axios.delete(`${BB_API}/api/products/${productId}`);
+    invalidateProductsCache();
+    return true;
+  } catch (error) {
+    throw new Error(getAxiosErrorMessage(error, 'Failed to delete product'));
+  }
 }
 
 async function toggleProductAvailability(productId) {
-  const bbProducts = await readJson(productsFile);
-  const idx = bbProducts.findIndex(p => String(p.id) === String(productId));
-  if (idx === -1) return null;
-  bbProducts[idx].isAvailable = !bbProducts[idx].isAvailable;
-  await writeJson(productsFile, bbProducts);
-  return transformBBProductToSK(bbProducts[idx]);
+  try {
+    const bbProducts = Object.values(await loadProductsMap());
+    const idx = bbProducts.findIndex(p => String(p.id) === String(productId));
+    if (idx === -1) return null;
+
+    const updatedProduct = {
+      ...bbProducts[idx],
+      isAvailable: !bbProducts[idx].isAvailable,
+    };
+
+    const response = await axios.put(
+      `${BB_API}/api/products/${productId}`,
+      updatedProduct
+    );
+
+    const savedProduct = unwrapApiEntity(response.data, updatedProduct, ['product', 'item']);
+    invalidateProductsCache();
+    return transformBBProductToSK(savedProduct);
+  } catch (error) {
+    throw new Error(getAxiosErrorMessage(error, 'Failed to toggle product availability'));
+  }
 }
 
 // ──────────── Customers (derived from orders) ────────────
 
 async function getCustomers({ search } = {}) {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
 
   // Group by customer email
   const customerMap = {};
@@ -417,7 +535,7 @@ async function getCustomers({ search } = {}) {
     const q = search.toLowerCase();
     customers = customers.filter(c =>
       c.name.toLowerCase().includes(q) ||
-      c.phone.includes(q) ||
+      String(c.phone).includes(q) ||
       c.email.toLowerCase().includes(q)
     );
   }
@@ -427,7 +545,7 @@ async function getCustomers({ search } = {}) {
 }
 
 async function getCustomerOrders(customerId) {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
   const productsMap = await loadProductsMap();
   const customerOrders = bbOrders.filter(o =>
     (o.customer?.email || 'unknown') === customerId
@@ -438,7 +556,7 @@ async function getCustomerOrders(customerId) {
 // ──────────── Payments (derived from orders) ────────────
 
 async function getPayments({ method, status, startDate, endDate, page = 1, limit = 20 } = {}) {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
 
   let payments = bbOrders.map(order => {
     const skStatus = BB_TO_SK_STATUS[order.status] || order.status;
@@ -478,7 +596,7 @@ async function getPayments({ method, status, startDate, endDate, page = 1, limit
 }
 
 async function getEarnings() {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -513,7 +631,7 @@ async function getEarnings() {
 }
 
 async function getPaymentSummary() {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
   const result = { COD: { total: 0, count: 0 }, Online: { total: 0, count: 0 } };
 
   for (const order of bbOrders) {
@@ -528,7 +646,7 @@ async function getPaymentSummary() {
 // ──────────── Dashboard Stats ────────────
 
 async function getDashboardStats() {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
@@ -562,7 +680,7 @@ async function getDashboardStats() {
 }
 
 async function getWeeklySales() {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
   const sevenDaysAgo = new Date();
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
@@ -586,7 +704,7 @@ async function getWeeklySales() {
 }
 
 async function getRecentOrders(limit = 10) {
-  const bbOrders = await readJson(ordersFile);
+  const bbOrders = await loadOrdersList();
   const productsMap = await loadProductsMap();
   const skOrders = bbOrders.map(o => transformBBOrderToSK(o, productsMap));
   skOrders.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));

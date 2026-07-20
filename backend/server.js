@@ -24,14 +24,22 @@ const allowedOrigins = (process.env.CLIENT_URLS || process.env.CLIENT_URL || 'ht
   .filter(Boolean);
 
 const corsOptions = {
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
-    return callback(new Error(`Origin ${origin} not allowed by CORS`));
+    console.log('Blocked by CORS:', origin);
+    return callback(null, false);
   },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization'
+  ]
 };
 
 const app = express();
@@ -45,6 +53,7 @@ connectDB();
 
 // Middleware
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 if (process.env.NODE_ENV !== 'production') app.use(morgan('dev'));
@@ -69,5 +78,5 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => {
   console.log(`🚀 Shopkeepers server running on port ${PORT}`);
-  console.log(`📂 Reading Bunny Burger data from: ${process.env.BB_DATA_DIR || 'default path'}`);
+  console.log(`🔗 Bunny Burger API: ${process.env.BB_API_URL || 'not configured'}`);
 });
