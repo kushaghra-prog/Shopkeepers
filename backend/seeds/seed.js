@@ -7,28 +7,45 @@ const Order = require('../models/Order');
 const Payment = require('../models/Payment');
 const DeliveryPartner = require('../models/DeliveryPartner');
 
+const DEMO_EMAIL = 'admin@restaurant.com';
+
 const seed = async () => {
   try {
     await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/shopkeepers');
     console.log('Connected to MongoDB');
 
-    // Clear all collections
-    await Promise.all([
-      User.deleteMany({}), MenuItem.deleteMany({}), Customer.deleteMany({}),
-      Order.deleteMany({}), Payment.deleteMany({}), DeliveryPartner.deleteMany({})
-    ]);
-    console.log('Cleared all collections');
+    // ── Check if demo user already exists (idempotent) ──
+    let user = await User.findOne({ email: DEMO_EMAIL });
+    let isExistingUser = false;
 
-    // Create restaurant owner
-    const user = await User.create({
-      name: 'Raj Kumar', email: 'admin@restaurant.com', password: 'password123',
-      phone: '9876543210', restaurantName: 'Spice Kitchen',
-      restaurantAddress: '123 MG Road, Koramangala, Bangalore - 560034',
-      cuisine: ['North Indian', 'Chinese', 'South Indian'], isOpen: true
-    });
-    console.log('Created user: admin@restaurant.com / password123');
+    if (user) {
+      console.log(`✅ Demo user already exists (${DEMO_EMAIL}), skipping user creation`);
+      isExistingUser = true;
+    } else {
+      user = await User.create({
+        name: 'Raj Kumar', email: DEMO_EMAIL, password: 'password123',
+        phone: '9876543210', restaurantName: 'Spice Kitchen',
+        restaurantAddress: '123 MG Road, Koramangala, Bangalore - 560034',
+        cuisine: ['North Indian', 'Chinese', 'South Indian'], isOpen: true
+      });
+      console.log(`Created demo user: ${DEMO_EMAIL} / password123`);
+    }
 
-    // Create menu items
+    // ── Only seed data for this specific demo user ──
+    // Remove old demo data (by restaurant ID), NOT all data
+    const existingMenuCount = await MenuItem.countDocuments({ restaurant: user._id });
+    if (existingMenuCount > 0) {
+      console.log(`Demo user already has ${existingMenuCount} menu items. Skipping data seed.`);
+      console.log('\n✅ Seed check complete! No destructive changes made.');
+      console.log(`Login: ${DEMO_EMAIL} / password123`);
+      console.log('All other user accounts are preserved.\n');
+      process.exit(0);
+      return;
+    }
+
+    console.log('Seeding demo data for demo user...');
+
+    // Create menu items for demo user only
     const menuData = [
       { name: 'Paneer Tikka', description: 'Marinated cottage cheese grilled in tandoor', price: 249, category: 'Starters', isVeg: true, preparationTime: 20 },
       { name: 'Chicken Wings', description: 'Crispy fried chicken wings with spicy sauce', price: 299, category: 'Starters', isVeg: false, preparationTime: 25 },
@@ -105,7 +122,6 @@ const seed = async () => {
       const customer = customers[Math.floor(Math.random() * customers.length)];
       const paymentMethod = Math.random() > 0.4 ? 'Online' : 'COD';
 
-      // Build timeline based on status
       const timeline = [{ status: 'Pending', timestamp: orderDate }];
       const statusFlow = ['Pending', 'Accepted', 'Preparing', 'Out for Delivery', 'Delivered'];
       const statusIdx = statusFlow.indexOf(status);
@@ -163,19 +179,25 @@ const seed = async () => {
     await Payment.insertMany(payments);
     console.log(`Created ${payments.length} payments`);
 
-    // Create delivery partners
-    const partnerData = [
-      { name: 'Ravi Kumar', phone: '9900100001', vehicleNumber: 'KA-01-AB-1234', vehicleType: 'Bike', totalDeliveries: 156, rating: 4.7 },
-      { name: 'Suresh Babu', phone: '9900100002', vehicleNumber: 'KA-01-CD-5678', vehicleType: 'Scooter', totalDeliveries: 98, rating: 4.5 },
-      { name: 'Mohammed Ali', phone: '9900100003', vehicleNumber: 'KA-01-EF-9012', vehicleType: 'Bike', totalDeliveries: 234, rating: 4.8 },
-      { name: 'Ganesh Prasad', phone: '9900100004', vehicleNumber: 'KA-01-GH-3456', vehicleType: 'Bicycle', totalDeliveries: 67, rating: 4.3 },
-      { name: 'Anil Sharma', phone: '9900100005', vehicleNumber: 'KA-01-IJ-7890', vehicleType: 'Bike', totalDeliveries: 189, rating: 4.6 },
-    ];
-    await DeliveryPartner.insertMany(partnerData);
-    console.log(`Created ${partnerData.length} delivery partners`);
+    // Create delivery partners (only if none exist)
+    const existingPartners = await DeliveryPartner.countDocuments();
+    if (existingPartners === 0) {
+      const partnerData = [
+        { name: 'Ravi Kumar', phone: '9900100001', vehicleNumber: 'KA-01-AB-1234', vehicleType: 'Bike', totalDeliveries: 156, rating: 4.7 },
+        { name: 'Suresh Babu', phone: '9900100002', vehicleNumber: 'KA-01-CD-5678', vehicleType: 'Scooter', totalDeliveries: 98, rating: 4.5 },
+        { name: 'Mohammed Ali', phone: '9900100003', vehicleNumber: 'KA-01-EF-9012', vehicleType: 'Bike', totalDeliveries: 234, rating: 4.8 },
+        { name: 'Ganesh Prasad', phone: '9900100004', vehicleNumber: 'KA-01-GH-3456', vehicleType: 'Bicycle', totalDeliveries: 67, rating: 4.3 },
+        { name: 'Anil Sharma', phone: '9900100005', vehicleNumber: 'KA-01-IJ-7890', vehicleType: 'Bike', totalDeliveries: 189, rating: 4.6 },
+      ];
+      await DeliveryPartner.insertMany(partnerData);
+      console.log(`Created ${partnerData.length} delivery partners`);
+    } else {
+      console.log(`${existingPartners} delivery partners already exist, skipping`);
+    }
 
     console.log('\n✅ Database seeded successfully!');
-    console.log('Login: admin@restaurant.com / password123\n');
+    console.log(`Demo login: ${DEMO_EMAIL} / password123`);
+    console.log('All other user accounts are preserved.\n');
     process.exit(0);
   } catch (error) {
     console.error('Seed error:', error);
