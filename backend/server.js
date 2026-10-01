@@ -73,15 +73,46 @@ app.use('/api/delivery-partners', deliveryRoutes);
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'OK', timestamp: new Date(), mode: 'Bunny Burger Integration' }));
 
-// Serve frontend in production — fixes 404 on page refresh
-if (process.env.NODE_ENV === 'production') {
-  const frontendPath = path.join(__dirname, '..', 'frontend', 'dist');
+// Serve frontend static files — fixes 404 on page refresh
+const fs = require('fs');
+const possiblePaths = [
+  path.join(__dirname, '..', 'frontend', 'dist'),      // monorepo: backend/ + frontend/
+  path.join(__dirname, '..', 'dist'),                    // if dist is at root
+  path.join(__dirname, 'public'),                        // if copied into backend/public
+  path.join(__dirname, '..', 'public'),                  // root public
+];
+
+let frontendPath = null;
+for (const p of possiblePaths) {
+  if (fs.existsSync(path.join(p, 'index.html'))) {
+    frontendPath = p;
+    break;
+  }
+}
+
+if (frontendPath) {
+  console.log(`✅ Serving frontend from: ${frontendPath}`);
   app.use(express.static(frontendPath));
 
-  // Catch-all: any route that isn't an API route serves index.html
-  // so React Router can handle client-side routing
+  // Catch-all: any non-API route serves index.html for React Router
   app.get('*', (req, res) => {
     res.sendFile(path.join(frontendPath, 'index.html'));
+  });
+} else {
+  console.log('⚠️ No frontend dist found. Searched:', possiblePaths);
+  // Catch-all: return a helpful message instead of 404
+  app.get('*', (req, res) => {
+    if (!req.path.startsWith('/api')) {
+      res.status(200).send(`
+        <html><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;background:#0f172a;color:#f8fafc">
+          <div style="text-align:center">
+            <h1 style="color:#f97316">Shopkeepers API</h1>
+            <p>Backend is running. Frontend dist not found.</p>
+            <p style="color:#94a3b8;font-size:14px">Build the frontend first: <code>cd frontend && npm run build</code></p>
+          </div>
+        </body></html>
+      `);
+    }
   });
 }
 
