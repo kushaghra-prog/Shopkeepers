@@ -1,11 +1,16 @@
-const bb = require('../services/bbDataService');
+const MenuItem = require('../models/MenuItem');
 
-// @desc    Get menu items
+// @desc    Get all menu items
 // @route   GET /api/menu
 const getMenuItems = async (req, res, next) => {
   try {
-    const { category, search } = req.query;
-    const items = await bb.getProducts({ category, search });
+    const { category, search, isAvailable } = req.query;
+    const query = { restaurant: req.user._id };
+    if (category) query.category = category;
+    if (isAvailable !== undefined) query.isAvailable = isAvailable === 'true';
+    if (search) query.name = { $regex: search, $options: 'i' };
+
+    const items = await MenuItem.find(query).sort({ category: 1, name: 1 });
     res.json(items);
   } catch (error) {
     next(error);
@@ -16,7 +21,9 @@ const getMenuItems = async (req, res, next) => {
 // @route   POST /api/menu
 const createMenuItem = async (req, res, next) => {
   try {
-    const item = await bb.createProduct(req.body);
+    const data = { ...req.body, restaurant: req.user._id };
+    if (req.file) data.image = `/uploads/${req.file.filename}`;
+    const item = await MenuItem.create(data);
     res.status(201).json(item);
   } catch (error) {
     next(error);
@@ -27,7 +34,9 @@ const createMenuItem = async (req, res, next) => {
 // @route   PUT /api/menu/:id
 const updateMenuItem = async (req, res, next) => {
   try {
-    const item = await bb.updateProduct(req.params.id, req.body);
+    const data = { ...req.body };
+    if (req.file) data.image = `/uploads/${req.file.filename}`;
+    const item = await MenuItem.findByIdAndUpdate(req.params.id, data, { new: true, runValidators: true });
     if (!item) return res.status(404).json({ message: 'Item not found' });
     res.json(item);
   } catch (error) {
@@ -39,9 +48,9 @@ const updateMenuItem = async (req, res, next) => {
 // @route   DELETE /api/menu/:id
 const deleteMenuItem = async (req, res, next) => {
   try {
-    const deleted = await bb.deleteProduct(req.params.id);
-    if (!deleted) return res.status(404).json({ message: 'Item not found' });
-    res.json({ message: 'Item deleted' });
+    const item = await MenuItem.findByIdAndDelete(req.params.id);
+    if (!item) return res.status(404).json({ message: 'Item not found' });
+    res.json({ message: 'Item deleted successfully' });
   } catch (error) {
     next(error);
   }
@@ -51,8 +60,10 @@ const deleteMenuItem = async (req, res, next) => {
 // @route   PATCH /api/menu/:id/toggle
 const toggleAvailability = async (req, res, next) => {
   try {
-    const item = await bb.toggleProductAvailability(req.params.id);
+    const item = await MenuItem.findById(req.params.id);
     if (!item) return res.status(404).json({ message: 'Item not found' });
+    item.isAvailable = !item.isAvailable;
+    await item.save();
     res.json(item);
   } catch (error) {
     next(error);
