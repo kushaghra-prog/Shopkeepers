@@ -73,6 +73,18 @@ app.use('/api/delivery-partners', deliveryRoutes);
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'OK', timestamp: new Date(), mode: 'Bunny Burger Integration' }));
 
+// Serve frontend in production — fixes 404 on page refresh
+if (process.env.NODE_ENV === 'production') {
+  const frontendPath = path.join(__dirname, '..', 'frontend', 'dist');
+  app.use(express.static(frontendPath));
+
+  // Catch-all: any route that isn't an API route serves index.html
+  // so React Router can handle client-side routing
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(frontendPath, 'index.html'));
+  });
+}
+
 // Error handler
 app.use(errorHandler);
 
